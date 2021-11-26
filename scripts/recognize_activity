@@ -1,0 +1,208 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import torch
+import torchvision
+import torchvision.transforms as transforms
+from pytorch_i3d import InceptionI3d
+from i3d_trainer import i3DTrainer
+
+import numpy as np
+import rospy
+from sensor_msgs.msg import Image
+from std_msgs.msg import String
+from metrics_refbox_msgs.msg import ActivityRecognitionResult, Command
+
+import cv2
+from cv_bridge import CvBridge, CvBridgeError
+
+
+class ActivityRecognizer(object):
+    def __init__(self):
+        # class variables
+        self.cv_bridge = CvBridge()
+        self.event_msg = None
+        self.image_queue = None
+        self.softmax_outputs = None
+        self.clip_size = rospy.get_param('~clip_length', 64)
+        self.average_over_n_clips = rospy.get_param('~average_over_n_clips', 10)
+        self.result_n_clips = rospy.get_param('~result_n_clips', 150)
+        self.use_gpu = rospy.get_param('~use_gpu', True)
+        print('Using GPU: ', self.use_gpu)
+
+        # ros parameters
+        self.loop_rate = rospy.Rate(rospy.get_param("~loop_rate", 10.0))
+        activity_classes_path = rospy.get_param("~activity_classes_path", 'activities.txt')
+        model_path = rospy.get_param("~model_path", 'rgb_charades.pt')
+
+        self.classes = np.loadtxt(activity_classes_path, dtype=str, delimiter=',')
+
+        self.image_transform = transforms.Compose([transforms.CenterCrop(448),
+                                                   transforms.Resize(224)])
+        self.i3d = i3DTrainer.load_from_checkpoint(model_path)
+
+        if self.use_gpu:
+            self.i3d = self.i3d.to('cuda:0')
+        self.i3d.eval()
+
+        self.recognized_activity_pub = rospy.Publisher("~recognized_activity", String, queue_size=1)
+        self.debug_image_pub = rospy.Publisher("~debug_image", Image, queue_size=1)
+        self.result_pub = rospy.Publisher("~result", ActivityRecognitionResult, queue_size=1)
+
+        # subscribers
+        self._event_in_sub = rospy.Subscriber("~command", Command, self._event_in_cb)
+
+        rospy.loginfo("Initialised ActivityRecognizer")
+
+    def _event_in_cb(self, msg):
+        self.event_msg = msg
+
+    def _input_image_cb(self, msg):
+        """
+        :msg: sensor_msgs.Image
+        :returns: None
+
+        """
+        try:
+            cv_image = self.cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+            if self.image_queue is None:
+                self.image_queue = []
+            self.image_queue.append(cv_image)
+            while len(self.image_queue) > self.clip_size:
+                self.image_queue.pop(0)
+        except CvBridgeError as e:
+            rospy.logerr("Could not convert ros sensor msgs Image to opencv Image.")
+            rospy.logerr(str(e))
+            self._check_failure()
+            return
+
+    def run(self):
+        rospy.loginfo("Ready to start...")
+        state = 'INIT'
+
+        while not rospy.is_shutdown():
+
+            if state == 'INIT':
+                state = self.init_state()
+            elif state == 'RUNNING':
+                state = self.running_state()
+
+            rospy.logdebug("State: {0}".format(state))
+            self.loop_rate.sleep()
+
+    def init_state(self):
+        if self.event_msg is not None and self.event_msg.command == self.event_msg.START:
+            if self.event_msg.task == self.event_msg.ACTIVITY_RECOGNITION:
+                rospy.loginfo('Got command to recognize activity')
+                self._image_sub = rospy.Subscriber(
+                    "~input_rgb_image", Image, self._input_image_cb
+                )
+                self.event_msg = None
+                return 'RUNNING'
+            else:
+                return 'INIT'
+        else:
+            return 'INIT'
+
+    def get_class_text(self, class_id):
+        return self.classes[class_id]
+
+
+    def running_state(self):
+        if self.event_msg is not None and self.event_msg.command == self.event_msg.STOP:
+            rospy.loginfo('got stop')
+            self.event_msg = None
+            self.image_queue = None
+            self.softmax_outputs = None
+            self._image_sub.unregister()
+            return 'INIT'
+        if self.image_queue is None or len(self.image_queue) < self.clip_size:
+            return 'RUNNING'
+
+        clip = self.get_torch_clip(self.image_queue)
+        activity_class = self.recognize(clip)
+
+        # Show intermediate results continuously
+        if len(self.softmax_outputs) >= self.average_over_n_clips:
+            accumulated_softmax = torch.stack(self.softmax_outputs[-self.average_over_n_clips:])
+            accumulated_softmax = accumulated_softmax.squeeze(1)
+            accumulated_softmax = accumulated_softmax.sum(axis=0)
+            class_ids = torch.topk(accumulated_softmax, 5)[1]
+            activity_classes = ''
+            class_ids = class_ids.detach().cpu().numpy()
+
+            last_image = self.image_queue[-1].copy()
+            last_image = last_image.astype(np.uint8)
+
+            for idx, class_id in enumerate(class_ids):
+                activity_class = self.get_class_text(class_id)
+                activity_classes += activity_class + '\n'
+                cv2.putText(last_image, activity_class, (10, 25 * (idx + 1) ), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+            self.recognized_activity_pub.publish(activity_classes)
+            debug_image = self.cv_bridge.cv2_to_imgmsg(last_image, encoding="bgr8")
+            self.debug_image_pub.publish(debug_image)
+
+        # Publish final result
+        if len(self.softmax_outputs) == self.result_n_clips:
+            accumulated_softmax = torch.stack(self.softmax_outputs)
+            accumulated_softmax = accumulated_softmax.squeeze(1)
+            accumulated_softmax = accumulated_softmax.sum(axis=0)
+            class_ids = torch.topk(accumulated_softmax, 5)[1]
+            activity_classes = ''
+            class_ids = class_ids.detach().cpu().numpy()
+            result = ActivityRecognitionResult()
+
+            for idx, class_id in enumerate(class_ids):
+                activity_class = self.get_class_text(class_id)
+                result.activities.append(activity_class)
+            self.result_pub.publish(result)
+            rospy.loginfo('published result')
+            self.event_msg = None
+            self.image_queue = None
+            self.softmax_outputs = None
+            self._image_sub.unregister()
+            return 'INIT'
+
+        return 'RUNNING'
+
+    def get_torch_clip(self, frames):
+        # convert to numpy array
+        clip = np.asarray(frames, dtype=np.float32)
+        clip = ((clip / 255.) * 2) - 1.
+        # convert to torch tensor and permute dimensions so we have 3 x 64 x 224 x 224
+        clip = torch.from_numpy(clip)
+        clip = clip.permute(3, 0, 1, 2)
+        # do a center crop to 448 and resize to 224 so image has size 224 x 224
+        clip = self.image_transform(clip)
+        return clip
+
+    def recognize(self, clip):
+        with torch.no_grad():
+            #add dimension for batch
+            clip = clip.unsqueeze(0)
+
+            #move input clip to GPU
+            if self.use_gpu:
+                clip = clip.to('cuda:0')
+
+            #run the clip through the model
+            per_frame_logits, prediction = self.i3d((clip, None, None))
+
+            #out has dimension 1 x num_classes x 2 : take max along last dimension
+            per_frame_logits = torch.max(per_frame_logits, dim=2)[0]
+            if self.softmax_outputs is None:
+                self.softmax_outputs = []
+            self.softmax_outputs.append(per_frame_logits)
+            # get argmax: [0,22]
+            activity_class_id = torch.argmax(per_frame_logits)
+            activity_class = self.classes[activity_class_id]
+            if len(self.softmax_outputs) > self.result_n_clips:
+                self.softmax_outputs.pop(0)
+        return activity_class
+
+
+if __name__ == "__main__":
+    rospy.init_node("activity_recognizer")
+    ar = ActivityRecognizer()
+    ar.run()
+    print("Exiting.")

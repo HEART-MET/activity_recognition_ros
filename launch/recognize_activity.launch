@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<launch>
+    <node pkg="activity_recognition_ros" type="recognize_activity" name="recognize_activity" output="screen">
+        <remap from="~input_rgb_image" to="/hsrb/head_rgbd_sensor/rgb/image_raw"/>
+        <remap from="~result" to="/metrics_refbox_client/activity_recognition_result"/>
+        <param name="loop_rate" type="double" value="10.0"/>
+        <param name="activity_classes_path" type="str" value="$(find activity_recognition_ros)/config/activities.txt"/>
+        <param name="model_path" type="str" value="$(find activity_recognition_ros)/config/epoch=36.ckpt"/>
+        <param name="use_gpu" type="bool" value="True"/>
+        <param name="clip_length" type="int" value="20"/>
+        <param name="average_over_n_clips" type="int" value="10"/>
+        <param name="result_n_clips" type="int" value="50"/>
+    </node>
+</launch>
