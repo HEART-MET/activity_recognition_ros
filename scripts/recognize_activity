@@ -151,6 +151,7 @@ class ActivityRecognizer(object):
             activity_classes = ''
             class_ids = class_ids.detach().cpu().numpy()
             result = ActivityRecognitionResult()
+            result.message_type = result.RESULT
 
             for idx, class_id in enumerate(class_ids):
                 activity_class = self.get_class_text(class_id)
