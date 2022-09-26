@@ -31,7 +31,7 @@ roslaunch activity_recognition_ros recognize_activity.launch
 
 Send a start command to the node
 ```
-rostopic pub /recognize_activity/command metrics_refbox_msgs/Command "task: 3
+rostopic pub /metrics_refbox_client/command metrics_refbox_msgs/Command "task: 3
 command: 1
 task_config: ''
 uid: ''" -1

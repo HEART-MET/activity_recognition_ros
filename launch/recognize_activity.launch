@@ -3,6 +3,7 @@
     <node pkg="activity_recognition_ros" type="recognize_activity" name="recognize_activity" output="screen">
         <remap from="~input_rgb_image" to="/hsrb/head_rgbd_sensor/rgb/image_raw"/>
         <remap from="~result" to="/metrics_refbox_client/activity_recognition_result"/>
+        <remap from="~command" to="/metrics_refbox_client/command"/>
         <param name="loop_rate" type="double" value="10.0"/>
         <param name="activity_classes_path" type="str" value="$(find activity_recognition_ros)/config/activities.txt"/>
         <param name="model_path" type="str" value="$(find activity_recognition_ros)/config/epoch=36.ckpt"/>
