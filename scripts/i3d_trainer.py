@@ -18,7 +18,7 @@ import pdb
 class i3DTrainer(pl.LightningModule):
     def __init__(self, hparams, load_pretrained_charades=False):
         super().__init__()
-        self.hparams = hparams
+        self.save_hyperparameters(hparams)
 
         self.i3d = InceptionI3d(400, in_channels=3)
         if load_pretrained_charades:
