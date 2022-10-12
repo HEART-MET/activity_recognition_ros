@@ -153,9 +153,11 @@ class ActivityRecognizer(object):
             result = ActivityRecognitionResult()
             result.message_type = result.RESULT
 
+            rospy.loginfo('Recognized activities:')
             for idx, class_id in enumerate(class_ids):
                 activity_class = self.get_class_text(class_id)
                 result.activities.append(activity_class)
+                rospy.loginfo('%d. %s' % (idx, activity_class))
             self.result_pub.publish(result)
             rospy.loginfo('published result')
             self.event_msg = None
