@@ -119,8 +119,7 @@ class ActivityRecognizer(object):
         if self.image_queue is None or len(self.image_queue) < self.clip_size:
             return 'RUNNING'
 
-        clip = self.get_torch_clip(self.image_queue)
-        activity_class = self.recognize(clip)
+        activity_class = self.recognize()
 
         # Show intermediate results continuously
         if len(self.softmax_outputs) >= self.average_over_n_clips:
@@ -157,7 +156,7 @@ class ActivityRecognizer(object):
             for idx, class_id in enumerate(class_ids):
                 activity_class = self.get_class_text(class_id)
                 result.activities.append(activity_class)
-                rospy.loginfo('%d. %s' % (idx, activity_class))
+                rospy.loginfo('%d. %s' % (idx + 1, activity_class))
             self.result_pub.publish(result)
             rospy.loginfo('published result')
             self.event_msg = None
@@ -179,7 +178,10 @@ class ActivityRecognizer(object):
         clip = self.image_transform(clip)
         return clip
 
-    def recognize(self, clip):
+    def recognize(self):
+        # get pytorch tensor from image_queue
+        clip = self.get_torch_clip(self.image_queue)
+
         with torch.no_grad():
             #add dimension for batch
             clip = clip.unsqueeze(0)
