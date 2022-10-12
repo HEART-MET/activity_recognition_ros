@@ -25,7 +25,6 @@ class ActivityRecognizer(object):
         self.image_queue = None
         self.softmax_outputs = None
         self.clip_size = rospy.get_param('~clip_length', 64)
-        self.average_over_n_clips = rospy.get_param('~average_over_n_clips', 10)
         self.result_n_clips = rospy.get_param('~result_n_clips', 150)
         self.use_gpu = rospy.get_param('~use_gpu', True)
         print('Using GPU: ', self.use_gpu)
@@ -67,6 +66,10 @@ class ActivityRecognizer(object):
             cv_image = self.cv_bridge.imgmsg_to_cv2(msg, "bgr8")
             if self.image_queue is None:
                 self.image_queue = []
+            '''
+            Images will be received at around 30 Hz,
+            so if you want a lower frequency in your clips, don't append all images here
+            '''
             self.image_queue.append(cv_image)
             while len(self.image_queue) > self.clip_size:
                 self.image_queue.pop(0)
@@ -121,34 +124,19 @@ class ActivityRecognizer(object):
 
         activity_class = self.recognize()
 
-        # Show intermediate results continuously
-        if len(self.softmax_outputs) >= self.average_over_n_clips:
-            accumulated_softmax = torch.stack(self.softmax_outputs[-self.average_over_n_clips:])
-            accumulated_softmax = accumulated_softmax.squeeze(1)
-            accumulated_softmax = accumulated_softmax.sum(axis=0)
-            class_ids = torch.topk(accumulated_softmax, 5)[1]
-            activity_classes = ''
-            class_ids = class_ids.detach().cpu().numpy()
-
-            last_image = self.image_queue[-1].copy()
-            last_image = last_image.astype(np.uint8)
-
-            for idx, class_id in enumerate(class_ids):
-                activity_class = self.get_class_text(class_id)
-                activity_classes += activity_class + '\n'
-                cv2.putText(last_image, activity_class, (10, 25 * (idx + 1) ), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-            self.recognized_activity_pub.publish(activity_classes)
-            debug_image = self.cv_bridge.cv2_to_imgmsg(last_image, encoding="bgr8")
-            self.debug_image_pub.publish(debug_image)
-
         # Publish final result
         if len(self.softmax_outputs) == self.result_n_clips:
+            # stack softmax outputs from multiple predictions and sum them
             accumulated_softmax = torch.stack(self.softmax_outputs)
             accumulated_softmax = accumulated_softmax.squeeze(1)
             accumulated_softmax = accumulated_softmax.sum(axis=0)
+            # get the top-5 class ids
             class_ids = torch.topk(accumulated_softmax, 5)[1]
             activity_classes = ''
             class_ids = class_ids.detach().cpu().numpy()
+
+
+            # publish the result
             result = ActivityRecognitionResult()
             result.message_type = result.RESULT
 
@@ -159,6 +147,8 @@ class ActivityRecognizer(object):
                 rospy.loginfo('%d. %s' % (idx + 1, activity_class))
             self.result_pub.publish(result)
             rospy.loginfo('published result')
+
+            # reset all variables
             self.event_msg = None
             self.image_queue = None
             self.softmax_outputs = None
@@ -190,14 +180,18 @@ class ActivityRecognizer(object):
             if self.use_gpu:
                 clip = clip.to('cuda:0')
 
-            #run the clip through the model
+            # Perform your prediction here
             per_frame_logits, prediction = self.i3d((clip, None, None))
 
             #out has dimension 1 x num_classes x 2 : take max along last dimension
             per_frame_logits = torch.max(per_frame_logits, dim=2)[0]
+
             if self.softmax_outputs is None:
                 self.softmax_outputs = []
+            ## Save softmax outputs / prediction probabilities in this variable
+            ## per_frame_logits should have a dimension of num_classes
             self.softmax_outputs.append(per_frame_logits)
+
             # get argmax: [0,22]
             activity_class_id = torch.argmax(per_frame_logits)
             activity_class = self.classes[activity_class_id]
